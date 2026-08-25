@@ -24,10 +24,13 @@ jobs:
           rm -f package-lock.json
           yarn install
 
+      - name: Fetch Contribution Data
+        # Runs in plain Node (not the browser Remotion renders in), so it can hit
+        # github.com directly without needing a third-party CORS proxy.
+        run: node scripts/fetch-contributions.mjs "${{ github.repository_owner }}" props.json
+
       - name: Render Video
-        # Automatically passes the repository owner's username as a prop so anyone can fork this!
-        run: |
-          npx remotion render MyComp out.gif --props='{"username": "${{ github.repository_owner }}"}'
+        run: npx remotion render MyComp out.gif --props=props.json
 
       - name: Generate Personalized Embed Code
         run: |

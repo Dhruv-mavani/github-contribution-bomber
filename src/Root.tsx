@@ -16,161 +16,38 @@ export type MyCompositionProps = {
   username: string;
 };
 
-import { Vector3, CatmullRomCurve3 } from "three";
-import { SPACING } from "./ContributionGrid";
-
-const EXPLOSION_RADIUS = 2.5; 
-const AIRPLANE_SPEED = 0.35; // slower, majestic flight speed
-
-const calculateMetadata: CalculateMetadataFunction<MyCompositionProps> = async ({ props, abortSignal }) => {
-  try {
-    // Added a cache-buster (?v=...) so the CORS proxy never serves a stale cached version
-    const res = await fetch(`https://corsproxy.io/?https://github.com/users/${props.username}/contributions?v=${Date.now()}`, {
-      signal: abortSignal,
-    });
-    
-    const html = await res.text();
-    
-    // GitHub's HTML contains missing days at the start or end of the year depending on the calendar alignment.
-    // To map this 100% robustly to our 52x7 grid, we must extract BOTH date and level, 
-    // sort them chronologically, and anchor the newest day to its exact day of the week.
-    const cells: { date: string, level: number }[] = [];
-    const tdRegex = /<td[^>]+class="ContributionCalendar-day"[^>]*>/g;
-    let match;
-    while ((match = tdRegex.exec(html)) !== null) {
-      const tdStr = match[0];
-      const dateMatch = tdStr.match(/data-date="([^"]+)"/);
-      const levelMatch = tdStr.match(/data-level="(\d+)"/);
-      if (dateMatch && levelMatch) {
-        cells.push({ date: dateMatch[1], level: parseInt(levelMatch[1], 10) });
-      }
-    }
-    
-    // Sort chronologically (oldest to newest)
-    cells.sort((a, b) => a.date.localeCompare(b.date));
-
-    const COLS = 52;
-    const ROWS = 7;
-    const finalLevels: number[] = new Array(COLS * ROWS).fill(0);
-    
-    if (cells.length > 0) {
-      const newestDateStr = cells[cells.length - 1].date;
-      // Get day of week (0=Sun, 6=Sat). Use UTC to avoid timezone shifts.
-      const newestDate = new Date(newestDateStr + "T00:00:00Z");
-      let r = newestDate.getUTCDay(); 
-      let c = COLS - 1;
-
-      for (let i = cells.length - 1; i >= 0; i--) {
-        if (c < 0) break; // Grid is full (we only keep the newest 364 days)
-        
-        finalLevels[c * ROWS + r] = cells[i].level;
-        
-        r--;
-        if (r < 0) {
-          r = ROWS - 1;
-          c--;
-        }
-      }
-    }
-
-    let greenBlocks = [];
-    for (let i = 0; i < finalLevels.length; i++) {
-      if (finalLevels[i] > 0) {
-        const c = Math.floor(i / ROWS);
-        const r = i % ROWS;
-        if (c < COLS) {
-          greenBlocks.push({ x: c, z: r });
-        }
-      }
-    }
-    
-    // Shuffle blocks completely for a random bombing path
-    greenBlocks.sort(() => Math.random() - 0.5);
-
-    const chosenTargets = [];
-    while (greenBlocks.length > 0) {
-      const target = greenBlocks[0];
-      chosenTargets.push(target);
-      
-      greenBlocks = greenBlocks.filter(block => {
-        const dx = block.x - target.x;
-        const dz = block.z - target.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        return dist > EXPLOSION_RADIUS;
-      });
-    }
-
-    const flightPath = [];
-    if (chosenTargets.length > 0) {
-      // Large sweeping entry point to give the plane room to turn into the grid
-      flightPath.push({ x: 26, z: -25 }); 
-      
-      for (const t of chosenTargets) flightPath.push({ x: t.x, z: t.z });
-      
-      // Large sweeping exit arc to smoothly loop back to the front
-      flightPath.push({ x: 52, z: 15 });
-      flightPath.push({ x: 26, z: 25 });
-      flightPath.push({ x: 0, z: 15 });
-    }
-
-    // Calculate curve physics to find exact target frames
-    const gridWidth = 52 * SPACING;
-    const gridDepth = 7 * SPACING;
-    const curvePoints = flightPath.map(p => 
-      new Vector3(p.x * SPACING - gridWidth/2, 8, p.z * SPACING - gridDepth/2)
-    );
-    const curve = new CatmullRomCurve3(curvePoints, true, "centripetal", 0.5);
-    curve.arcLengthDivisions = 3000; // Extremely high resolution to prevent jitter in physics
-    const totalLength = curve.getLength();
-    const durationInFrames = Math.max(300, Math.ceil(totalLength / AIRPLANE_SPEED));
-
-    const targets: BombTarget[] = chosenTargets.map((t) => {
-      const targetVec = new Vector3(t.x * SPACING - gridWidth/2, 8, t.z * SPACING - gridDepth/2);
-      let minDistance = Infinity;
-      let bestU = 0;
-      // High resolution scan to find exact drop frame
-      const RESOLUTION = 2000;
-      for (let i = 0; i <= RESOLUTION; i++) {
-        const u = i / RESOLUTION;
-        const p = curve.getPointAt(u);
-        const dist = p.distanceTo(targetVec);
-        if (dist < minDistance) {
-          minDistance = dist;
-          bestU = u;
-        }
-      }
-      return { x: t.x, z: t.z, frame: Math.round(bestU * durationInFrames) };
-    });
-
+// The actual GitHub contribution fetch happens in scripts/fetch-contributions.mjs,
+// a plain Node script run *before* `remotion render`, whose output is passed in via
+// `--props=props.json`. It used to happen right here inside calculateMetadata, but
+// that runs inside a real headless Chrome tab (Puppeteer), where fetching github.com
+// is blocked by CORS unless proxied through a third party — which is exactly what
+// broke this project when that proxy service changed its terms. Doing the fetch in
+// plain Node sidesteps CORS entirely, since it isn't a browser context.
+const calculateMetadata: CalculateMetadataFunction<MyCompositionProps> = async ({ props }) => {
+  // Pre-computed props (targets/flightPath/durationInFrames) came in via --props=props.json.
+  if (props.levels?.length > 0 && props.targets?.length > 0) {
     return {
-      durationInFrames,
-      props: {
-        ...props,
-        levels: finalLevels,
-        targets,
-        flightPath,
-        durationInFrames,
-        username: props.username,
-      },
-      width: 1200,
-      height: 600,
-    };
-  } catch (err) {
-    console.error("Failed to fetch GitHub contributions", err);
-    return {
-      durationInFrames: 300,
-      props: {
-        ...props,
-        levels: Array(52 * 7).fill(0),
-        targets: [{ x: 25, z: 3, frame: 75 }],
-        flightPath: [{x:0, z:0}, {x:25, z:3}, {x:52, z:7}, {x:26, z:14}],
-        durationInFrames: 300,
-        username: props.username,
-      },
+      durationInFrames: props.durationInFrames,
+      props,
       width: 1200,
       height: 600,
     };
   }
+
+  // No pre-computed data (e.g. running `remotion studio` locally without the fetch
+  // script) — fall back to placeholder demo data just so the composition previews.
+  return {
+    durationInFrames: 300,
+    props: {
+      ...props,
+      levels: Array(52 * 7).fill(0),
+      targets: [{ x: 25, z: 3, frame: 75 }],
+      flightPath: [{ x: 0, z: 0 }, { x: 25, z: 3 }, { x: 52, z: 7 }, { x: 26, z: 14 }],
+      durationInFrames: 300,
+    },
+    width: 1200,
+    height: 600,
+  };
 };
 
 export const RemotionRoot: React.FC = () => {
