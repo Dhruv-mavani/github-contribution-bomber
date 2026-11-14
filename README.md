@@ -1,4 +1,4 @@
-# 🚀 GitHub Contribution Bomber
+# GitHub Contribution Bomber
 
 Turn your boring 2D GitHub contribution graph into a **cinematic 3D bombing run** that updates automatically every day! 
 
